@@ -1,0 +1,5 @@
+flask==3.0.3
+telethon==1.36.0
+pybit==5.7.2
+python-dotenv==1.0.1
+python-telegram-bot
