@@ -204,8 +204,13 @@ async def bot_message_handler(event):
     print(f"Bot response received: {event.raw_text}")
     await handle_bot_response(event)
 
+@app.route('/')
+def home():
+    """Root endpoint to confirm the app is running."""
+    return jsonify({"status": "Flask app is running", "message": "Use /otp to send OTP or /health for status check"}), 200
+
 @app.route('/otp', methods=['POST'])
-async def receive_otp():
+def receive_otp():
     """Endpoint to receive OTP via POST request."""
     global otp_received
     try:
