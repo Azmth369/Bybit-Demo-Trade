@@ -4,6 +4,7 @@ import asyncio
 import traceback
 from flask import Flask, request, jsonify
 from telethon import TelegramClient, events
+from telethon.errors import SessionPasswordNeededError, PhoneCodeInvalidError, FloodWaitError
 from pybit.unified_trading import HTTP
 from dotenv import load_dotenv
 import os
@@ -18,17 +19,37 @@ logging.basicConfig(
     format='%(asctime)s %(levelname)s %(message)s'
 )
 
-# Load environment variables from .env file
+# Load environment variables from .env file (for local testing)
 load_dotenv()
 
 # Configuration variables from environment
 API_KEY = os.getenv("API_KEY")
 API_SECRET = os.getenv("API_SECRET")
-API_ID = int(os.getenv("API_ID"))
+API_ID = os.getenv("API_ID")
 API_HASH = os.getenv("API_HASH")
 BOT_USERNAME = os.getenv("BOT_USERNAME")
 PHONE_NUMBER = os.getenv("PHONE_NUMBER")
 SESSION_NAME = os.getenv("SESSION_NAME")
+
+# Validate environment variables
+required_vars = {
+    'API_KEY': API_KEY,
+    'API_SECRET': API_SECRET,
+    'API_ID': API_ID,
+    'API_HASH': API_HASH,
+    'BOT_USERNAME': BOT_USERNAME,
+    'PHONE_NUMBER': PHONE_NUMBER,
+    'SESSION_NAME': SESSION_NAME
+}
+missing_vars = [key for key, value in required_vars.items() if not value]
+if missing_vars:
+    raise ValueError(f"Missing required environment variables: {', '.join(missing_vars)}")
+
+# Convert API_ID to integer
+try:
+    API_ID = int(API_ID)
+except ValueError as e:
+    raise ValueError("Environment variable API_ID must be a valid integer") from e
 
 # Initialize Bybit session
 session = HTTP(api_key=API_KEY, api_secret=API_SECRET, testnet=False, demo=True)
@@ -36,9 +57,10 @@ session = HTTP(api_key=API_KEY, api_secret=API_SECRET, testnet=False, demo=True)
 # Initialize Telegram client
 client = TelegramClient(SESSION_NAME, API_ID, API_HASH)
 
-# Global variable to store OTP and manage login state
+# Global variables to manage OTP state
 otp_received = None
 login_event = asyncio.Event()
+otp_request_sent = False
 
 def get_step_size(symbol):
     """Fetch the step size for the given symbol."""
@@ -73,7 +95,7 @@ def format_trade_details(symbol, price, stop_loss_price, take_profit_price, qty,
     trade_info += f"{'USDT Equity':<20}: {equity:,.2f}\n"
     trade_info += f"{'Wallet Balance':<20}: {wallet_balance:,.2f}\n"
     trade_info += "========================\n"
-    return trade_info
+   return trade_info
 
 async def handle_bot_response(event):
     """Handles bot response to extract trading parameters and place an order."""
@@ -151,17 +173,21 @@ async def handle_bot_response(event):
             }
 
             logging.info(f"Placing order with parameters: {order_params}")
-            order = session.place_order(**order_params)
-
-            if order["retCode"] == 0:
-                trade_details = format_trade_details(
-                    symbol, price, stop_loss_price, take_profit_price,
-                    max_qty, order, equity, wallet_balance
-                )
-                logging.info(trade_details)
-                print(trade_details)
-            else:
-                error_msg = f"Error placing order: {order['retMsg']}"
+            try:
+                order = session.place_order(**order_params)
+                if order["retCode"] == 0:
+                    trade_details = format_trade_details(
+                        symbol, price, stop_loss_price, take_profit_price,
+                        max_qty, order, equity, wallet_balance
+                    )
+                    logging.info(trade_details)
+                    print(trade_details)
+                else:
+                    error_msg = f"Error placing order: {order['retMsg']}"
+                    logging.error(error_msg)
+                    print(error_msg)
+            except Exception as e:
+                error_msg = f"Error placing order: {traceback.format_exc()}"
                 logging.error(error_msg)
                 print(error_msg)
         else:
@@ -185,57 +211,136 @@ async def receive_otp():
     try:
         data = request.get_json()
         if not data or 'otp' not in data:
+            logging.error("Invalid OTP request: OTP is required")
+            print("Invalid OTP request: OTP is required")
             return jsonify({"error": "OTP is required"}), 400
 
         otp = data['otp']
         otp_received = otp
         login_event.set()  # Signal that OTP has been received
         logging.info(f"OTP received: {otp}")
+        print(f"OTP received: {otp}")
         return jsonify({"message": "OTP received successfully", "otp": otp}), 200
     except Exception as e:
         logging.error(f"Error receiving OTP: {traceback.format_exc()}")
+        print(f"Error receiving OTP: {str(e)}")
         return jsonify({"error": str(e)}), 500
+
+@app.route('/health', methods=['GET'])
+def health_check():
+    """Health check endpoint for Render."""
+    return jsonify({"status": "healthy"}), 200
 
 async def telegram_login():
     """Handle Telegram login with OTP."""
-    global otp_received
+    global otp_received, otp_request_sent
     try:
+        logging.info("Connecting to Telegram client...")
+        print("Connecting to Telegram client...")
         await client.connect()
+        logging.info("Checking if client is authorized...")
+        print("Checking if client is authorized...")
         if not await client.is_user_authorized():
-            print("Client not authorized, requesting code...")
-            await client.start(phone=PHONE_NUMBER)
-            print("Waiting for OTP...")
+            if not otp_request_sent:
+                logging.info("Initiating login for Telegram account...")
+                print("Initiating login for Telegram account...")
+                try:
+                    await client.send_code_request(PHONE_NUMBER)
+                    otp_request_sent = True
+                    logging.info(f"OTP request sent successfully to {PHONE_NUMBER}")
+                    print(f"OTP request sent successfully to {PHONE_NUMBER}")
+                except FloodWaitError as e:
+                    logging.error(f"Error: Too many requests for Telegram account. Please wait {e.seconds} seconds before trying again")
+                    print(f"Error: Too many requests for Telegram account. Please wait {e.seconds} seconds before trying again")
+                    return False
+                except Exception as e:
+                    logging.error(f"Error sending OTP request for Telegram account: {str(e)}")
+                    print(f"Error sending OTP request for Telegram account: {str(e)}")
+                    return False
+
+            logging.info("Waiting for OTP via /otp endpoint...")
+            print("Waiting for OTP for Telegram account...")
             await login_event.wait()  # Wait for OTP to be received
             if otp_received:
-                await client.sign_in(phone=PHONE_NUMBER, code=otp_received)
-                print("Logged in successfully.")
-                otp_received = None  # Reset OTP
-                login_event.clear()  # Reset event
+                try:
+                    await client.sign_in(phone=PHONE_NUMBER, code=otp_received)
+                    logging.info("Login successful for Telegram account")
+                    print("Login successful for Telegram account")
+                    return True
+                except PhoneCodeInvalidError:
+                    logging.error(f"Error: Invalid OTP provided: {otp_received}. Please check the code and try again")
+                    print(f"Error: Invalid OTP provided: {otp_received}. Please check the code and try again")
+                    otp_received = None
+                    login_event.clear()
+                    return False
+                except SessionPasswordNeededError:
+                    logging.error("Error: Two-factor authentication is enabled for Telegram account. Password login is not supported")
+                    print("Error: Two-factor authentication is enabled for Telegram account. Password login is not supported")
+                    otp_received = None
+                    login_event.clear()
+                    return False
+                except Exception as e:
+                    logging.error(f"Unexpected error during login: {str(e)}")
+                    print(f"Unexpected error during login: {str(e)}")
+                    otp_received = None
+                    login_event.clear()
+                    return False
             else:
-                raise ValueError("OTP not received")
+                logging.error("Error: OTP not received")
+                print("Error: OTP not received")
+                return False
         else:
-            print("Client already authorized.")
+            logging.info("Telegram account is already authorized")
+            print("Telegram account is already authorized")
+            return True
     except Exception as e:
-        logging.error(f"Error during Telegram login: {traceback.format_exc()}")
-        raise
+        logging.error(f"Unexpected error during Telegram login: {traceback.format_exc()}")
+        print(f"Unexpected error during Telegram login: {str(e)}")
+        return False
 
-async def run_flask():
-    """Run the Flask app in a separate thread."""
-    from threading import Thread
-    def start_flask():
-        app.run(host='0.0.0.0', port=int(os.getenv("PORT", 5000)))
-    Thread(target=start_flask, daemon=True).start()
+def run_flask():
+    """Run the Flask app in the main thread."""
+    port = int(os.getenv("PORT", 5000))
+    logging.info(f"Starting Flask app on port {port}")
+    print(f"Starting Flask app on port {port}")
+    try:
+        app.run(host='0.0.0.0', port=port, debug=False)
+    except Exception as e:
+        logging.error(f"Failed to start Flask app: {traceback.format_exc()}")
+        print(f"Failed to start Flask app: {str(e)}")
+        raise
 
 async def main():
     """Main function to start Flask and Telegram client."""
-    # Start Flask app
-    await run_flask()
-    print("Flask app started.")
+    # Start Flask in the main thread to ensure immediate binding
+    from threading import Thread
+    flask_thread = Thread(target=run_flask, daemon=False)
+    flask_thread.start()
 
-    # Handle Telegram login
-    await telegram_login()
-    print("Telegram client started. Listening for bot messages...")
-    await client.run_until_disconnected()
+    # Wait briefly to ensure Flask has started
+    await asyncio.sleep(2)
+
+    # Handle Telegram login concurrently
+    try:
+        success = await telegram_login()
+        if success:
+            print("Telegram login completed successfully.")
+            logging.info("Telegram login completed successfully")
+        else:
+            print("Telegram login failed but Flask is running")
+            logging.error("Telegram login failed but Flask is running")
+    except Exception as e:
+        logging.error(f"Telegram login failed but Flask is running: {str(e)}")
+        print(f"Telegram login failed but Flask is running: {str(e)}")
+
+    # Start Telegram client event loop
+    try:
+        print("Telegram client started. Listening for bot messages...")
+        logging.info("Telegram client started. Listening for bot messages...")
+        await client.run_until_disconnected()
+    except Exception as e:
+        logging.error(f"Telegram client failed: {traceback.format_exc()}")
+        print(f"Telegram client failed: {str(e)}")
 
 if __name__ == "__main__":
     asyncio.run(main())
