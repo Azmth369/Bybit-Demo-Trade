@@ -1,5 +1,7 @@
-flask==3.0.3
-telethon==1.36.0
-pybit==5.7.2
+pybit==5.8.0
+telethon==1.28.0
+pip==24.3.1
+python-telegram-bot==20.0
+requests==2.31.0
+Flask
 python-dotenv==1.0.1
-python-telegram-bot
