@@ -95,7 +95,7 @@ def format_trade_details(symbol, price, stop_loss_price, take_profit_price, qty,
     trade_info += f"{'USDT Equity':<20}: {equity:,.2f}\n"
     trade_info += f"{'Wallet Balance':<20}: {wallet_balance:,.2f}\n"
     trade_info += "========================\n"
-   return trade_info
+    return trade_info
 
 async def handle_bot_response(event):
     """Handles bot response to extract trading parameters and place an order."""
@@ -320,27 +320,21 @@ async def main():
     # Wait briefly to ensure Flask has started
     await asyncio.sleep(2)
 
-    # Handle Telegram login concurrently
-    try:
-        success = await telegram_login()
-        if success:
-            print("Telegram login completed successfully.")
-            logging.info("Telegram login completed successfully")
-        else:
-            print("Telegram login failed but Flask is running")
-            logging.error("Telegram login failed but Flask is running")
-    except Exception as e:
-        logging.error(f"Telegram login failed but Flask is running: {str(e)}")
-        print(f"Telegram login failed but Flask is running: {str(e)}")
-
-    # Start Telegram client event loop
-    try:
-        print("Telegram client started. Listening for bot messages...")
-        logging.info("Telegram client started. Listening for bot messages...")
-        await client.run_until_disconnected()
-    except Exception as e:
-        logging.error(f"Telegram client failed: {traceback.format_exc()}")
-        print(f"Telegram client failed: {str(e)}")
+    # Handle Telegram login
+    success = await telegram_login()
+    if success:
+        print("Telegram login completed successfully.")
+        logging.info("Telegram login completed successfully")
+        try:
+            print("Telegram client started. Listening for bot messages...")
+            logging.info("Telegram client started. Listening for bot messages...")
+            await client.run_until_disconnected()
+        except Exception as e:
+            logging.error(f"Telegram client failed: {traceback.format_exc()}")
+            print(f"Telegram client failed: {str(e)}")
+    else:
+        print("Telegram login failed permanently. Stopping Telegram client. Flask app continues to run.")
+        logging.error("Telegram login failed permanently. Stopping Telegram client. Flask app continues to run.")
 
 if __name__ == "__main__":
     asyncio.run(main())
